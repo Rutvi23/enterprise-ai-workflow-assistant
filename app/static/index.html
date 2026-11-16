@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Enterprise AI Workflow Assistant</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1c1f26; --muted:#667085; --line:#e4e7ec; --brand:#1f5eff; --ok:#12805c; --warn:#b54708; --bad:#b42318; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0f1115; --card:#181b22; --text:#e8eaf0; --muted:#98a2b3; --line:#2a2f3a; --brand:#6b8dff; --ok:#3fb98f; --warn:#f0a35e; --bad:#f2786b; } }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--text); }
+  header { padding:16px 24px; border-bottom:1px solid var(--line); background:var(--card); display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:18px; margin:0; flex:1; }
+  header input { width:200px; }
+  main { max-width:1200px; margin:0 auto; padding:20px; display:grid; gap:16px; grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); }
+  section { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; min-width:0; }
+  section.wide { grid-column:1/-1; }
+  h2 { font-size:15px; margin:0 0 12px; }
+  input, textarea, button { font:inherit; color:inherit; }
+  input[type=text], input[type=password], textarea { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:8px; background:transparent; }
+  textarea { resize:vertical; min-height:64px; }
+  button { padding:7px 14px; border:1px solid var(--line); border-radius:8px; background:transparent; cursor:pointer; }
+  button.primary { background:var(--brand); color:#fff; border-color:var(--brand); }
+  button.ok { border-color:var(--ok); color:var(--ok); } button.bad { border-color:var(--bad); color:var(--bad); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px; }
+  .muted { color:var(--muted); font-size:13px; }
+  .pill { display:inline-block; padding:1px 8px; border-radius:999px; font-size:12px; border:1px solid var(--line); }
+  .pill.high { color:var(--bad); border-color:var(--bad); } .pill.medium { color:var(--warn); border-color:var(--warn); } .pill.low { color:var(--ok); border-color:var(--ok); }
+  .src { border-left:3px solid var(--brand); padding:4px 10px; margin:8px 0; font-size:13px; }
+  .src b { font-size:12px; }
+  .item { border:1px solid var(--line); border-radius:8px; padding:10px; margin:8px 0; }
+  pre { white-space:pre-wrap; word-break:break-word; margin:4px 0; font-size:12.5px; background:var(--bg); padding:8px; border-radius:6px; }
+  .answer { white-space:pre-wrap; margin:8px 0; }
+  ul { padding-left:18px; margin:6px 0; }
+  .step { font-size:13px; padding:3px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Enterprise AI Workflow Assistant</h1>
+  <span id="health" class="muted"></span>
+  <input id="apikey" type="password" placeholder="X-API-Key (if enabled)">
+</header>
+<main>
+  <section>
+    <h2>1 · Documents</h2>
+    <input id="file" type="file" accept=".pdf,.txt,.md">
+    <div class="row"><button class="primary" id="upload">Upload</button><span id="uploadMsg" class="muted"></span></div>
+    <div id="docs"></div>
+  </section>
+
+  <section>
+    <h2>2 · Ask your documents</h2>
+    <textarea id="question" placeholder="e.g. What is the notice period for termination?"></textarea>
+    <div class="row"><button class="primary" id="ask">Ask</button><span id="askMsg" class="muted"></span></div>
+    <div id="answer"></div>
+  </section>
+
+  <section>
+    <h2>3 · Agent</h2>
+    <textarea id="instruction" placeholder="e.g. Email alice@example.com a summary of the termination clause"></textarea>
+    <div class="row"><button class="primary" id="run">Run agent</button><span id="runMsg" class="muted"></span></div>
+    <div class="muted" style="margin-top:8px">Try: “Create a task to review the vendor agreement by Friday” · “List documents”</div>
+    <div id="runView"></div>
+  </section>
+
+  <section>
+    <h2>4 · Pending approvals <button id="refresh" style="float:right">Refresh</button></h2>
+    <div id="approvals"></div>
+  </section>
+
+  <section class="wide">
+    <h2>5 · Audit log &amp; outbox</h2>
+    <div style="display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr))">
+      <div><b>Audit trail</b><div id="audit"></div></div>
+      <div><b>Outbox (simulated email) &amp; tasks</b><div id="outbox"></div></div>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+async function api(path, opts = {}) {
+  const headers = {...(opts.headers || {})};
+  const key = $('apikey').value || sessionStorage.getItem('apikey');
+  if (key) { headers['X-API-Key'] = key; sessionStorage.setItem('apikey', key); }
+  if (opts.json) { headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(opts.json); }
+  const res = await fetch(path, {...opts, headers});
+  if (res.status === 204) return null;
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || res.statusText);
+  return data;
+}
+
+async function loadDocs() {
+  const docs = await api('/api/documents');
+  $('docs').innerHTML = docs.length ? docs.map(d => `<div class="item"><b>${esc(d.filename)}</b>
+    <div class="muted">${d.pages} page(s) · ${d.chunk_count} chunks · id ${esc(d.id)}</div>
+    <button class="bad" onclick="delDoc('${esc(d.id)}')">Delete</button></div>`).join('') : '<p class="muted">No documents yet.</p>';
+}
+async function delDoc(id) { await api('/api/documents/' + id, {method:'DELETE'}); loadDocs(); loadSide(); }
+
+$('upload').onclick = async () => {
+  const f = $('file').files[0]; if (!f) return;
+  const fd = new FormData(); fd.append('file', f);
+  $('uploadMsg').textContent = 'Uploading…';
+  try { const d = await api('/api/documents', {method:'POST', body: fd});
+        $('uploadMsg').textContent = d.duplicate ? 'Already uploaded.' : 'Indexed ' + d.chunk_count + ' chunks.'; loadDocs(); }
+  catch (e) { $('uploadMsg').textContent = '⚠ ' + e.message; }
+};
+
+$('ask').onclick = async () => {
+  const q = $('question').value.trim(); if (!q) return;
+  $('askMsg').textContent = 'Thinking…'; $('answer').innerHTML = '';
+  try {
+    const r = await api('/api/ask', {method:'POST', json:{question:q}});
+    $('askMsg').textContent = r.grounded ? '' : 'No grounded answer';
+    $('answer').innerHTML = `<div class="answer">${esc(r.answer)}</div>` + r.sources.map(s =>
+      `<div class="src"><b>[${s.n}] ${esc(s.filename)} · page ${s.page} · score ${s.score}</b><div>${esc(s.snippet)}…</div></div>`).join('');
+  } catch (e) { $('askMsg').textContent = '⚠ ' + e.message; }
+};
+
+function renderStep(s) {
+  switch (s.kind) {
+    case 'tool_call': return `<div class="step">🔧 Proposed <b>${esc(s.tool)}</b> <code>${esc(JSON.stringify(s.arguments))}</code></div>`;
+    case 'approval_requested': return `<div class="step">⏸ Waiting for approval <span class="pill ${esc(s.risk)}">${esc(s.risk)} risk</span></div>`;
+    case 'arguments_edited': return `<div class="step">✏️ Reviewer edited arguments</div>`;
+    case 'approval_resolved': return `<div class="step">${s.decision === 'rejected' ? '⛔' : '✅'} ${esc(s.decision)} by ${esc(s.reviewer)}</div>`;
+    case 'tool_result': return `<div class="step">📥 Result of <b>${esc(s.tool)}</b><pre>${esc(JSON.stringify(s.result, null, 1).slice(0, 600))}</pre></div>`;
+    case 'final': return `<div class="step">💬 <b>Final answer</b><div class="answer">${esc(s.content)}</div></div>`;
+    default: return '';
+  }
+}
+function renderRun(run) {
+  $('runView').innerHTML = `<div class="item"><span class="pill">${esc(run.status)}</span> <span class="muted">run ${esc(run.id)}</span>
+    ${run.steps.map(renderStep).join('')}${run.error ? `<div class="step" style="color:var(--bad)">⚠ ${esc(run.error)}</div>` : ''}</div>`;
+}
+$('run').onclick = async () => {
+  const t = $('instruction').value.trim(); if (!t) return;
+  $('runMsg').textContent = 'Running…';
+  try { renderRun(await api('/api/agent/runs', {method:'POST', json:{instruction:t}})); $('runMsg').textContent = ''; loadSide(); }
+  catch (e) { $('runMsg').textContent = '⚠ ' + e.message; }
+};
+
+async function loadApprovals() {
+  const items = await api('/api/approvals?status=pending');
+  $('approvals').innerHTML = items.length ? items.map(a => `<div class="item">
+    <b>${esc(a.tool)}</b> <span class="pill ${esc(a.risk)}">${esc(a.risk)} risk</span>
+    <div class="muted">approval ${esc(a.id)} · run ${esc(a.run_id ?? 'mcp')}</div>
+    <div class="muted">Edit arguments (JSON) before approving if needed:</div>
+    <textarea id="args-${esc(a.id)}">${esc(JSON.stringify(a.arguments, null, 2))}</textarea>
+    <div class="row"><button class="ok" onclick="decide('${esc(a.id)}', true)">Approve &amp; run</button>
+    <button class="bad" onclick="decide('${esc(a.id)}', false)">Reject</button></div></div>`).join('')
+    : '<p class="muted">Nothing waiting for review.</p>';
+}
+async function decide(id, approve) {
+  let args = null;
+  if (approve) { try { args = JSON.parse($('args-' + id).value); } catch { return alert('Arguments must be valid JSON'); } }
+  try {
+    const r = await api(`/api/approvals/${id}/${approve ? 'approve' : 'reject'}`, {method:'POST', json:{reviewer:'web-user', arguments: args}});
+    if (r.run) renderRun(r.run);
+  } catch (e) { alert(e.message); }
+  loadSide();
+}
+
+async function loadSide() {
+  loadApprovals();
+  const [audit, box] = await Promise.all([api('/api/audit?limit=15'), api('/api/outbox')]);
+  $('audit').innerHTML = audit.map(a => `<div class="step"><span class="muted">${esc(a.ts.slice(11,19))}</span> ${esc(a.event)} ${esc(a.tool || '')}</div>`).join('') || '<p class="muted">Empty.</p>';
+  $('outbox').innerHTML = box.emails.map(m => `<div class="item"><b>✉ ${esc(m.to)}</b> — ${esc(m.subject)}<pre>${esc(m.body)}</pre></div>`).join('')
+    + box.tasks.map(t => `<div class="item"><b>☑ ${esc(t.id)}</b> ${esc(t.title)} <span class="muted">${esc(t.due || '')}</span></div>`).join('')
+    || '<p class="muted">Nothing executed yet.</p>';
+}
+$('refresh').onclick = loadSide;
+
+(async () => {
+  try { const h = await fetch('/health').then(r => r.json()); $('health').textContent = `LLM: ${h.llm} · retriever: ${h.retriever}`; } catch {}
+  try { await loadDocs(); await loadSide(); } catch (e) { $('uploadMsg').textContent = '⚠ ' + e.message; }
+})();
+</script>
+</body>
+</html>
